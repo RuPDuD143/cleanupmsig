@@ -579,7 +579,11 @@ const get = (id) => document.getElementById(id);
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 async function apiFetch(path) {
   const url = PROXY + API_BASE + path;
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    headers: {
+      'x-requested-with': 'XMLHttpRequest'
+    }
+  });
   const text = await res.text();
   const match = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
   if (!match) throw new Error("No JSON found in response for: " + path);
