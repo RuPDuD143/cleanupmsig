@@ -530,20 +530,7 @@
 </div>
 
 <script type="module">
-  export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const targetUrl = url.searchParams.get("url"); // Get the target API URL
-
-    // Fetch the data from the target API
-    const response = await fetch(targetUrl);
-
-    // Create a new response with the CORS headers added
-    const newResponse = new Response(response.body, response);
-    newResponse.headers.set("Access-Control-Allow-Origin", "https://rupdud143.github.io");
-    return newResponse;
-  }
-};
+  
 import { UInt64 } from "https://esm.sh/@wharfkit/antelope@0.7.3";
 import { SessionKit } from "https://esm.sh/@wharfkit/session@1.6.1";
 import { WalletPluginCloudWallet } from "https://esm.sh/@wharfkit/wallet-plugin-cloudwallet@1.3.2";
@@ -554,7 +541,7 @@ const CHAIN = {
   id: "1064487b3cd1a897ce03ae5b6a865651747e2e152090f99c1d19d44e01aea5a4",
   url: "https://wax.greymass.com"
 };
-const PROXY        = "";
+const PROXY        = "https://cleanupcentr.rrlworlds1434.workers.dev/?url=";
 const API_BASE     = "https://maestrobeatz.servegame.com";
 const FARM_ID      = "1099958357919";
 
