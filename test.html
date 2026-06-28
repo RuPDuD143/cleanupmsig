@@ -1248,6 +1248,7 @@ function queuePlantActions(item, pendingActions, statusCell, afterHarvest) {
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
 function updateLoop() {
+  let plantActions = 0;
   const now = Date.now();
   const pendingActions = [];
   resetPlantCounters();
@@ -1259,6 +1260,7 @@ function updateLoop() {
     const timerCell  = item.row.querySelector(".slotTimer");
 
     if (item.state === "READY") {
+      plantActions += 1;
       statusCell.innerHTML = `<span class="badge badge-harvest">🌾 Harvest</span>`;
       timerCell.textContent = "—";
       pendingActions.push({
@@ -1270,6 +1272,7 @@ function updateLoop() {
       queuePlantActions(item, pendingActions, statusCell, true);
 
     } else if (item.state === "EMPTY") {
+      plantActions += 1;
       timerCell.textContent = "—";
       queuePlantActions(item, pendingActions, statusCell, false);
 
@@ -1292,6 +1295,7 @@ function updateLoop() {
       statusCell.innerHTML =
         `<span class="badge badge-water">💧 Water</span> ` +
         `<span class="badge badge-harvest">🌾 Harvest</span>`;
+      plantActions += 1;
       timerCell.textContent = "Last water!";
       pendingActions.push({
         account: CONTRACT, name: "water",
@@ -1317,7 +1321,7 @@ function updateLoop() {
   });
 
   // Energy recharge
-  const numPlots = farmSlots.length;
+  const numPlots = farmSlots.length + plantActions;
   const energyThreshold = numPlots * 2;
   const curEnergy = energyData?.energy ?? 0;
   if (curEnergy < energyThreshold) {
