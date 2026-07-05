@@ -1664,9 +1664,13 @@ get("sendBtn").addEventListener("click", async () => {
     return;
   }
 
-  // ── Fee is already locked in at fetch time and included in builtActions ──
-  // (or in the filtered list if it wasn't skipped). Just send as-is.
-  const actions = filteredActions.map(({ _label, ...a }) => ({
+  // ── Append the locked fee action if it exists ──
+  let finalActions = filteredActions;
+  if (lockedFeeAction) {
+    finalActions = [...filteredActions, lockedFeeAction];
+  }
+
+  const actions = finalActions.map(({ _label, ...a }) => ({
     ...a,
     authorization: [perm()],
     data: convertUInt64Fields(a.data)
