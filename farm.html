@@ -580,6 +580,34 @@ const FEE_PER_POINT_USD = 0.001;
 // and 1 fee point per machine's TOMATOE+BANANAZ load pair (counted once per machine, not twice).
 const TASK_FEE_ACTIONS  = new Set(["water", "harvest", "plant", "startmach", "claimmach", "claimseedrwd"]);
 
+// ─── Crafting mechanics (buy pack / open pack / compost blends) ──────────────
+// Buy pack: whenever TOMATOE balance exceeds the cost of one pack, buy as
+// many packs as the balance affords in a single pair of transfers.
+const PACK_BLEND_ID       = 1;          // blend id used in both BUY:1:n and BLEND:1 memos
+const TOMATOE_PACK_MAIN   = 1800000;    // per pack → rhythmfarmer (CONTRACT)
+const TOMATOE_PACK_FEE    = 420000;     // per pack → rupdud143143 (RUCOIN_CTR)
+const TOMATOE_PACK_COST   = TOMATOE_PACK_MAIN + TOMATOE_PACK_FEE; // 2,220,000 per pack
+
+// Open pack: any bag NFT crate whose recipe_id matches PACK_BLEND_ID gets
+// transferred to CONTRACT with memo BLEND:<recipe_id> to open it.
+
+// Compost blend (BLEND:4): batches of 10 "Compost Bag" NFTs (template 904726),
+// only once at least COMPOST_BLEND_MIN are sitting unused in the bag.
+const COMPOST_TPL_ID      = 904726;
+const COMPOST_BLEND_ID    = 4;
+const COMPOST_BLEND_BATCH = 10;
+const COMPOST_BLEND_MIN   = 35;
+const COMPOST_BLEND_TOMATOE_QTY = "71000.00000000 TOMATOE";
+const COMPOST_BLEND_BANANAZ_QTY = "7100.00000000 BANANAZ";
+
+// Eco compost blend (BLEND:2): batches of 3 "EcoFusion Compost" NFTs
+// (template 900863), only once at least ECO_BLEND_MIN are unused in the bag.
+const ECO_COMPOST_TPL_ID  = 900863;
+const ECO_BLEND_ID        = 2;
+const ECO_BLEND_BATCH     = 3;
+const ECO_BLEND_MIN       = 3;
+const ECO_BLEND_TOMATOE_QTY = "323000.00000000 TOMATOE";
+
 // Returns true if an action should incur a fee point.
 function isActionFeeable(action) {
   if (!action) return false;
@@ -592,6 +620,10 @@ function isActionFeeable(action) {
   if (account === ATOMIC_CTR && name === "transfer") {
     const memo = data?.memo || "";
     if (memo.includes("deposit:compost") || memo.includes("open:seedpack")) return true;
+    // Pack opens (atomicassets crate → CONTRACT, BLEND:<PACK_BLEND_ID>) — one point per pack.
+    if (memo === `BLEND:${PACK_BLEND_ID}`) return true;
+    // Plot staking (atomicassets plot NFT → CONTRACT, stake:plot:<FARM_ID>) — one point per plot.
+    if (memo === `stake:plot:${FARM_ID}`) return true;
   }
   return false;
 }
@@ -617,6 +649,8 @@ let energyData     = null;
 let machineData    = null;
 let compostBalance = 0;    // in-game compost points
 let bagCompostArray = [];  // NFT compost items in wallet bag
+let bagPackArray    = [];  // NFT crate/pack items in wallet bag
+let bagPlotArray    = [];  // newly-minted Plot NFTs in wallet bag (need staking)
 let builtActions   = [];
 let loopTimer      = null;
 let autoTimer      = null;
@@ -697,20 +731,45 @@ async function fetchRucoinPrice() {
 //  - 1 pt for each CINDER "load" (energy-maximize) transfer
 //  - 1 pt for each NFT seed/compost stake (atomicassets deposit/seedpack transfers)
 //  - 1 pt total per machine for its TOMATOE+BANANAZ load pair (not 2 pts)
+// Counts fee points across a list of built actions:
+//  - 1 pt each for: water / harvest / plant / startmach / claimmach / claimseedrwd
+//  - 1 pt for each CINDER "load" (energy-maximize) transfer
+//  - 1 pt for each NFT seed/compost stake (atomicassets deposit/seedpack transfers)
+//  - 1 pt for each pack opened (atomicassets BLEND:<PACK_BLEND_ID> transfer)
+//  - 1 pt for each plot NFT staked (atomicassets stake:plot:<FARM_ID> transfer)
+//  - 1 pt total per machine for its TOMATOE+BANANAZ load pair (not 2 pts)
+//  - 1 pt total per "buy pack" event (its two token transfers count once)
+//  - 1 pt per compost blend group and 1 pt per eco compost blend group
 function calculateFeePoints(actions) {
   let points = 0;
   const machineLoadIds = new Set();
+  const compostBlendGroups = new Set();
+  const ecoBlendGroups = new Set();
+  let buyPackCounted = false;
   actions.forEach(a => {
     if (!a || a._label?.startsWith("💸 Fee")) return; // never fee the fee itself
     if (isActionFeeable(a)) {
       points += 1;
-    } else if (a.account === MAESTRO_CTR && a.name === "transfer") {
+      return;
+    }
+    if (a.account === MAESTRO_CTR && a.name === "transfer") {
       // Check if this is a machine load (TOMATOE/BANANAZ deposit)
       const mid = a.data?.memo?.match(/recipe:machine:(\d+)/)?.[1];
-      if (mid) machineLoadIds.add(mid);
+      if (mid) { machineLoadIds.add(mid); return; }
+      // Buy-pack transfers (either leg) — counted once per buy event
+      if (a._label?.startsWith("🛒")) { buyPackCounted = true; return; }
     }
+    // Compost / eco compost blends — 1 pt per blend group, regardless of
+    // how many of that group's transfers (TOMATOE/BANANAZ/atomicassets) show up.
+    const compostMatch = a._label?.match(/^🧪 Compost blend #(\d+)/);
+    if (compostMatch) { compostBlendGroups.add(compostMatch[1]); return; }
+    const ecoMatch = a._label?.match(/^🧬 Eco compost blend #(\d+)/);
+    if (ecoMatch) { ecoBlendGroups.add(ecoMatch[1]); return; }
   });
   points += machineLoadIds.size;
+  points += compostBlendGroups.size;
+  points += ecoBlendGroups.size;
+  if (buyPackCounted) points += 1;
   return points;
 }
 
@@ -840,7 +899,20 @@ get("fetchBtn").addEventListener("click", async () => {
 
     bagCompostArray = bagAssets
       .filter(a => a.schema === "compost" || (a.nft_type || "").toLowerCase().includes("compost"))
-      .map(a => ({ asset_id: a.asset_id, name: a.name || "Compost NFT" }));
+      .map(a => ({ asset_id: a.asset_id, template_id: a.template_id || 0, name: a.name || "Compost NFT" }));
+
+    bagPackArray = bagAssets
+      .filter(a => a.schema === "packs" || (a.nft_type || "").toLowerCase().includes("crate"))
+      .map(a => ({
+        asset_id: a.asset_id,
+        template_id: a.template_id || 0,
+        recipe_id: a.recipe_id ?? null,
+        name: a.name || "Pack NFT"
+      }));
+
+    bagPlotArray = bagAssets
+      .filter(a => a.schema === "land" || (a.nft_type || "").toLowerCase().includes("plot"))
+      .map(a => ({ asset_id: a.asset_id, template_id: a.template_id || 0, name: a.name || "Plot NFT" }));
 
     status.textContent = "Fetching energy…";
     energyData = await apiFetch(`/userenergy/${actor()}`);
@@ -1241,6 +1313,11 @@ function actionIcon(name, label) {
   if (name === "water")   return "💧";
   if (name === "claimmach") return "📦";
   if (name === "startmach") return "▶️";
+  if (label?.startsWith("🛒")) return "🛒";
+  if (label?.startsWith("🎁")) return "🎁";
+  if (label?.startsWith("🧪")) return "🧪";
+  if (label?.startsWith("🧬")) return "🧬";
+  if (label?.startsWith("🗺️")) return "🗺️";
   if (label?.includes("TOMATOE")) return "🍅";
   if (label?.includes("BANANAZ")) return "🍌";
   return "🔧";
@@ -1372,6 +1449,106 @@ function queuePlantActions(item, pendingActions, statusCell, afterHarvest) {
     ? `<span class="badge badge-harvest">🌾 Harvest</span> ` : '';
   statusCell.innerHTML = extraBadge +
     `<span class="badge badge-skip">⛔ No seeds — manual action needed</span>`;
+}
+
+// ─── Crafting mechanics ────────────────────────────────────────────────────────
+
+// Buy pack(s): once TOMATOE balance exceeds the cost of one pack, buy as many
+// whole packs as it affords in one shot (two transfers, scaled by quantity).
+function buildBuyPackActions() {
+  if (balances.tomatoe <= TOMATOE_PACK_COST) return [];
+  const numPacks = Math.floor(balances.tomatoe / TOMATOE_PACK_COST);
+  if (numPacks < 1) return [];
+  const mainQty = (TOMATOE_PACK_MAIN * numPacks).toFixed(8);
+  const feeQty  = (TOMATOE_PACK_FEE  * numPacks).toFixed(8);
+  return [
+    {
+      account: MAESTRO_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, quantity: `${mainQty} TOMATOE`, memo: `BUY:${PACK_BLEND_ID}:${numPacks}` },
+      _label: `🛒 Buy ${numPacks} seed pack${numPacks > 1 ? "s" : ""} — ${mainQty} TOMATOE`
+    },
+    {
+      account: MAESTRO_CTR, name: "transfer",
+      data: { from: actor(), to: RUCOIN_CTR, quantity: `${feeQty} TOMATOE`, memo: "cleanupcentr earnings" },
+      _label: `🛒 Pack purchase earnings — ${feeQty} TOMATOE`
+    }
+  ];
+}
+
+// Open pack(s): any bag crate NFT whose recipe_id matches PACK_BLEND_ID gets
+// transferred to CONTRACT to open it, one atomicassets transfer per crate.
+function buildOpenPackActions() {
+  return bagPackArray
+    .filter(p => p.recipe_id === PACK_BLEND_ID)
+    .map(p => ({
+      account: ATOMIC_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, asset_ids: [p.asset_id], memo: `BLEND:${PACK_BLEND_ID}` },
+      _label: `🎁 Open pack (${p.asset_id})`
+    }));
+}
+
+// Compost blend (BLEND:4): batches of 10 Compost Bag NFTs (template 904726),
+// only once at least COMPOST_BLEND_MIN are unused/available in the bag.
+// `availableCompost` should already exclude any NFTs claimed for plot staking.
+function buildCompostBlendActions(availableCompost) {
+  const actions = [];
+  const eligible = availableCompost.filter(c => c.template_id === COMPOST_TPL_ID);
+  if (eligible.length < COMPOST_BLEND_MIN) return actions;
+  const numBlends = Math.floor(eligible.length / COMPOST_BLEND_BATCH);
+  for (let i = 0; i < numBlends; i++) {
+    const batch = eligible.slice(i * COMPOST_BLEND_BATCH, (i + 1) * COMPOST_BLEND_BATCH);
+    const ids = batch.map(c => c.asset_id);
+    actions.push({
+      account: MAESTRO_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, quantity: COMPOST_BLEND_TOMATOE_QTY, memo: `BLEND:${COMPOST_BLEND_ID}` },
+      _label: `🧪 Compost blend #${i + 1} — ${COMPOST_BLEND_TOMATOE_QTY}`
+    });
+    actions.push({
+      account: MAESTRO_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, quantity: COMPOST_BLEND_BANANAZ_QTY, memo: `BLEND:${COMPOST_BLEND_ID}` },
+      _label: `🧪 Compost blend #${i + 1} — ${COMPOST_BLEND_BANANAZ_QTY}`
+    });
+    actions.push({
+      account: ATOMIC_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, asset_ids: ids, memo: `BLEND:${COMPOST_BLEND_ID}` },
+      _label: `🧪 Compost blend #${i + 1} — 10 NFTs`
+    });
+  }
+  return actions;
+}
+
+// Eco compost blend (BLEND:2): batches of 3 EcoFusion Compost NFTs
+// (template 900863), only once at least ECO_BLEND_MIN are unused in the bag.
+function buildEcoBlendActions(availableCompost) {
+  const actions = [];
+  const eligible = availableCompost.filter(c => c.template_id === ECO_COMPOST_TPL_ID);
+  if (eligible.length < ECO_BLEND_MIN) return actions;
+  const numBlends = Math.floor(eligible.length / ECO_BLEND_BATCH);
+  for (let i = 0; i < numBlends; i++) {
+    const batch = eligible.slice(i * ECO_BLEND_BATCH, (i + 1) * ECO_BLEND_BATCH);
+    const ids = batch.map(c => c.asset_id);
+    actions.push({
+      account: MAESTRO_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, quantity: ECO_BLEND_TOMATOE_QTY, memo: `BLEND:${ECO_BLEND_ID}` },
+      _label: `🧬 Eco compost blend #${i + 1} — ${ECO_BLEND_TOMATOE_QTY}`
+    });
+    actions.push({
+      account: ATOMIC_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, asset_ids: ids, memo: `BLEND:${ECO_BLEND_ID}` },
+      _label: `🧬 Eco compost blend #${i + 1} — 3 NFTs`
+    });
+  }
+  return actions;
+}
+
+// Stake plot(s): any bag Plot NFT (minted after a blend) gets transferred to
+// CONTRACT with memo stake:plot:<FARM_ID> to add it to the farm.
+function buildStakePlotActions() {
+  return bagPlotArray.map(p => ({
+    account: ATOMIC_CTR, name: "transfer",
+    data: { from: actor(), to: CONTRACT, asset_ids: [p.asset_id], memo: `stake:plot:${FARM_ID}` },
+    _label: `🗺️ Stake plot NFT (${p.asset_id})`
+  }));
 }
 
 // ─── Energy / Maximize simulation ─────────────────────────────────────────────
@@ -1562,6 +1739,16 @@ function updateLoop() {
       });
     }
   });
+
+  // Crafting mechanics: buy packs, open packs, and blend compost.
+  // Compost NFTs already claimed for plot staking above (indices < _bagCompostIdx)
+  // are excluded so blends never compete with planting for the same NFT.
+  const availableCompost = bagCompostArray.slice(_bagCompostIdx);
+  pendingActions.push(...buildBuyPackActions());
+  pendingActions.push(...buildOpenPackActions());
+  pendingActions.push(...buildCompostBlendActions(availableCompost));
+  pendingActions.push(...buildEcoBlendActions(availableCompost));
+  pendingActions.push(...buildStakePlotActions());
 
   // Machine actions
   const machines = machineData?.machines || [];
