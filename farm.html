@@ -1430,11 +1430,23 @@ function queuePlantActions(item, pendingActions, statusCell, afterHarvest) {
 const SEED_STOCK_THRESHOLD   = 20;
 const HELD_SEED_PACK_TPL_ID  = 904728;
 
+// Seeds each unopened bag crate will yield (minimum), keyed by crate template id.
+// Counted toward seed stock so we don't buy more crates while a backlog of
+// unopened ones is sitting in the bag. Unlisted crate templates count as 0.
+const CRATE_MIN_SEEDS = {
+  904730: 3,   // small crate — at least 3 seeds
+  900986: 10,  // eco crate  — at least 10 seeds
+};
+function seedsInBagCrates() {
+  return bagPackArray.reduce((sum, p) => sum + (CRATE_MIN_SEEDS[Number(p.template_id)] || 0), 0);
+}
+
 // Buy pack(s): once TOMATOE balance exceeds the cost of one pack, buy as many
 // whole packs as it affords in one shot (two transfers, scaled by quantity).
 function buildBuyPackActions() {
-  // Only buy while total seed stock (in-game + bag NFTs) is below the threshold.
-  if (seedArray.length + bagSeedArray.length >= SEED_STOCK_THRESHOLD) return [];
+  // Only buy while total seed stock (in-game + bag seed NFTs + seeds still
+  // locked in unopened bag crates) is below the threshold.
+  if (seedArray.length + bagSeedArray.length + seedsInBagCrates() >= SEED_STOCK_THRESHOLD) return [];
   if (balances.tomatoe <= TOMATOE_PACK_COST) return [];
   const numPacks = Math.floor(balances.tomatoe / TOMATOE_PACK_COST);
   if (numPacks < 1) return [];
