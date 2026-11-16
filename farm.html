@@ -1419,7 +1419,13 @@ function queuePlantActions(item, pendingActions, statusCell, afterHarvest) {
     return;
   }
 
-  // ── No in-game seeds — try bag NFT seeds ──
+  // ── No in-game seeds left — try bag NFT seeds ──
+  // If 20+ in-game seeds were on hand, skip (don't open) template 904728 packs.
+  while (
+    _bagSeedIdx < bagSeedArray.length &&
+    seedArray.length >= SEED_STOCK_THRESHOLD &&
+    Number(bagSeedArray[_bagSeedIdx].seed_tpl_id) === HELD_SEED_PACK_TPL_ID
+  ) _bagSeedIdx++;
   if (_bagSeedIdx < bagSeedArray.length) {
     const nftSeed = bagSeedArray[_bagSeedIdx];
     const hasCompost = resolveCompost(pendingActions, plotLabel);
@@ -1452,6 +1458,9 @@ function queuePlantActions(item, pendingActions, statusCell, afterHarvest) {
 }
 
 // ─── Crafting mechanics ────────────────────────────────────────────────────────
+// Seed pack template held back (not opened) once in-game seeds reach the threshold.
+const SEED_STOCK_THRESHOLD   = 20;
+const HELD_SEED_PACK_TPL_ID  = 904728;
 
 // Buy pack(s): once TOMATOE balance exceeds the cost of one pack, buy as many
 // whole packs as it affords in one shot (two transfers, scaled by quantity).
