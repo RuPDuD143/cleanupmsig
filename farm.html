@@ -1361,13 +1361,11 @@ function renderQueue(actions) {
 // ─── Plant action helper ───────────────────────────────────────────────────────
 // Tracks consumed seeds/compost within the loop run (reset each loop call)
 let seedIdx        = 0;  // in-game seed pointer
-let _bagSeedIdx    = 0;
 let _bagCompostIdx = 0;
 let _compostUsed   = 0;  // in-game compost consumed this loop
 
 function resetPlantCounters() {
   seedIdx        = 0;
-  _bagSeedIdx    = 0;
   _bagCompostIdx = 0;
   _compostUsed   = 0;
 }
@@ -1419,42 +1417,12 @@ function queuePlantActions(item, pendingActions, statusCell, afterHarvest) {
     return;
   }
 
-  // ── No in-game seeds left — try bag NFT seeds ──
-  // If 20+ in-game seeds were on hand, skip (don't open) template 904728 packs.
-  while (
-    _bagSeedIdx < bagSeedArray.length &&
-    seedArray.length >= SEED_STOCK_THRESHOLD &&
-    Number(bagSeedArray[_bagSeedIdx].seed_tpl_id) === HELD_SEED_PACK_TPL_ID
-  ) _bagSeedIdx++;
-  if (_bagSeedIdx < bagSeedArray.length) {
-    const nftSeed = bagSeedArray[_bagSeedIdx];
-    const hasCompost = resolveCompost(pendingActions, plotLabel);
-    if (!hasCompost) {
-      const extraBadge = afterHarvest
-        ? `<span class="badge badge-harvest">🌾 Harvest</span> ` : '';
-      statusCell.innerHTML = extraBadge +
-        `<span class="badge badge-skip">⚠️ No compost — skip plant</span>`;
-      return;
-    }
-    _bagSeedIdx++;
-    // Queue atomicassets transfer to stake the seed NFT
-    pendingActions.push({
-      account: ATOMIC_CTR, name: "transfer",
-      data: { from: actor(), to: CONTRACT, asset_ids: [nftSeed.seed_asset_id], memo: "open:seedpack" },
-      _label: `📦 Stake seed NFT (${nftSeed.seed_asset_id}) for ${plotLabel}`
-    });
-    const extraBadge = afterHarvest
-      ? `<span class="badge badge-harvest">🌾 Harvest</span> ` : '';
-    statusCell.innerHTML = extraBadge +
-      `<span class="badge badge-plant">📦 Stake seed NFT</span>`;
-    return;
-  }
-
   // ── No seeds anywhere — skip and mark ──
   const extraBadge = afterHarvest
     ? `<span class="badge badge-harvest">🌾 Harvest</span> ` : '';
-  statusCell.innerHTML = extraBadge +
-    `<span class="badge badge-skip">⛔ No seeds — manual action needed</span>`;
+  statusCell.innerHTML = extraBadge + (bagSeedArray.length > 0
+    ? `<span class="badge badge-skip">📦 Seed NFTs opening — plant next run</span>`
+    : `<span class="badge badge-skip">⛔ No seeds — manual action needed</span>`);
 }
 
 // ─── Crafting mechanics ────────────────────────────────────────────────────────
@@ -1465,6 +1433,8 @@ const HELD_SEED_PACK_TPL_ID  = 904728;
 // Buy pack(s): once TOMATOE balance exceeds the cost of one pack, buy as many
 // whole packs as it affords in one shot (two transfers, scaled by quantity).
 function buildBuyPackActions() {
+  // Only buy while total seed stock (in-game + bag NFTs) is below the threshold.
+  if (seedArray.length + bagSeedArray.length >= SEED_STOCK_THRESHOLD) return [];
   if (balances.tomatoe <= TOMATOE_PACK_COST) return [];
   const numPacks = Math.floor(balances.tomatoe / TOMATOE_PACK_COST);
   if (numPacks < 1) return [];
@@ -1484,17 +1454,33 @@ function buildBuyPackActions() {
   ];
 }
 
-// Open pack: the contract only reads ONE crate per transaction, so only the
-// first matching bag crate (recipe_id === PACK_BLEND_ID) is opened per signature.
+// Open pack: the contract only reads ONE crate per transaction, so only one
+// crate is opened per signature. Any crate type with a recipe_id counts (not
+// just PACK_BLEND_ID) — e.g. the EcoCrate, recipe_id 3. Crates missing a
+// recipe_id are skipped so a broken "BLEND:null" memo is never sent.
 // Any others stay in the bag and get picked up on the next run.
 function buildOpenPackActions() {
   return bagPackArray
-    .filter(p => p.recipe_id === PACK_BLEND_ID)
+    .filter(p => p.recipe_id !== null && p.recipe_id !== undefined)
     .slice(0, 1)
     .map(p => ({
       account: ATOMIC_CTR, name: "transfer",
-      data: { from: actor(), to: CONTRACT, asset_ids: [p.asset_id], memo: `BLEND:${PACK_BLEND_ID}` },
+      data: { from: actor(), to: CONTRACT, asset_ids: [p.asset_id], memo: `BLEND:${p.recipe_id}` },
       _label: `🎁 Open pack (${p.asset_id})`
+    }));
+}
+
+// Open seed NFTs: every seed NFT in the bag is opened unconditionally, whether
+// or not a plot slot is waiting for it. Exception: template HELD_SEED_PACK_TPL_ID
+// is held back once in-game seeds have reached SEED_STOCK_THRESHOLD.
+function buildOpenSeedActions() {
+  const stocked = seedArray.length >= SEED_STOCK_THRESHOLD;
+  return bagSeedArray
+    .filter(s => !(stocked && Number(s.seed_tpl_id) === HELD_SEED_PACK_TPL_ID))
+    .map(s => ({
+      account: ATOMIC_CTR, name: "transfer",
+      data: { from: actor(), to: CONTRACT, asset_ids: [s.seed_asset_id], memo: "open:seedpack" },
+      _label: `📦 Open seed NFT (${s.seed_asset_id})`
     }));
 }
 
@@ -1757,6 +1743,7 @@ function updateLoop() {
   const availableCompost = bagCompostArray.slice(_bagCompostIdx);
   pendingActions.push(...buildBuyPackActions());
   pendingActions.push(...buildOpenPackActions());
+  pendingActions.push(...buildOpenSeedActions());
   pendingActions.push(...buildCompostBlendActions(availableCompost));
   pendingActions.push(...buildEcoBlendActions(availableCompost));
   pendingActions.push(...buildStakePlotActions());
