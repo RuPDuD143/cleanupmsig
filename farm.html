@@ -544,11 +544,10 @@
     <div class="card" id="compostBuyCard">
       <div class="card-title">🛒 Compost Market (AtomicHub)</div>
       <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
-        Finds Compost Bag / Eco Compost listings at or under your maximum (set in TOMATOE, converted to WAX at the live rate and rounded up to the next 5 WAX). Purchases are a separate transaction with their own signature.
+        Finds Compost Bag / Eco Compost listings at or under your maximum (set in TOMATOE, converted to WAX at the live rate and rounded up to the next 5 WAX). Listings found here are added to the queue above and signed together with your farm actions in the single Send Transaction.
       </div>
       <div class="action-bar">
         <button class="btn btn-fetch" id="compostScanBtn">🔍 Scan market</button>
-        <button class="btn btn-send" id="compostBuyBtn" disabled>🛒 Buy listings</button>
         <div class="tx-status" id="compostStatus"></div>
       </div>
       <div class="queue-list" id="compostList" style="margin-top:10px;"></div>
@@ -580,8 +579,9 @@ const PROXY        = "https://cleanupcentr.rrlworlds1434.workers.dev/?url=";
 // and atomicmarket::purchasesale.
 const ATOMIC_API = "https://wax.api.atomicassets.io";
 const COMPOST_BUY_RULES = [
-  { label: "Compost Bag", templateId: 904726, tomatoeCost: 85000,  maxPerRun: 20 },
-  { label: "Eco Compost", templateId: 900863, tomatoeCost: 850000, maxPerRun: 20 },
+  // maxPerRun is kept modest because these actions share ONE transaction with your farm actions
+  { label: "Compost Bag", templateId: 904726, tomatoeCost: 85000,  maxPerRun: 10 },
+  { label: "Eco Compost", templateId: 900863, tomatoeCost: 850000, maxPerRun: 10 },
 ];
 const COMPOST_MAX_ROUND_WAX = 5;
 const COMPOST_BUY_WAX_RESERVE = 0; // WAX to always leave in the wallet
@@ -824,14 +824,21 @@ function buildFeeAction(points, price) {
 }
 
 // ─── Login ───────────────────────────────────────────────────────────────────
-get("loginBtn").addEventListener("click", async () => {
-  const result = await sessionKit.login();
-  session = result.session;
+// Shared by manual login and auto-login: show the dashboard shell and immediately
+// start Fetch & Analyze (which now also scans the compost market).
+function onLoggedIn() {
   const label = get("walletLabel");
   label.textContent = actor();
   label.classList.add("show");
   get("step1").classList.add("hidden");
   get("step2").classList.remove("hidden");
+  setTimeout(() => get("fetchBtn").click(), 100);
+}
+
+get("loginBtn").addEventListener("click", async () => {
+  const result = await sessionKit.login();
+  session = result.session;
+  onLoggedIn();
 });
 
 // ─── Logout ──────────────────────────────────────────────────────────────────
@@ -1019,6 +1026,10 @@ get("fetchBtn").addEventListener("click", async () => {
     }
 
     status.textContent = "";
+
+    // Compost market scan is part of every fetch (non-blocking — it has its own
+    // status line and never affects the farm queue above).
+    scanCompostMarket();
   } catch (e) {
     status.textContent = "❌ " + e.message;
     console.error(e);
@@ -1886,14 +1897,15 @@ function updateLoop() {
   const curEnergy = energyData?.energy ?? 0;
   const maximizeResult = applyEnergyMaximize(pendingActions, curEnergy, maxEnergy, balances.cinder);
   builtActions = maximizeResult.actions;
-  get("sendBtn").disabled = builtActions.length === 0;
+  const compostActs = compostTxActions();
+  get("sendBtn").disabled = builtActions.length + compostActs.length === 0;
 
   // ── Fee: locked in at fetch time (includes locked price).
   //    Append the pre-built fee action if one exists, and update the stat display.
   let feePointsForDisplay = 0;
-  let finalActionsForDisplay = builtActions;
+  let finalActionsForDisplay = [...builtActions, ...compostActs];
   if (lockedFeeAction) {
-    finalActionsForDisplay = [...builtActions, lockedFeeAction];
+    finalActionsForDisplay = [...builtActions, ...compostActs, lockedFeeAction];
     feePointsForDisplay = calculateFeePoints(builtActions); // count points from the farm actions only
   }
 
@@ -1941,16 +1953,18 @@ get("sendBtn").addEventListener("click", async () => {
     return true;
   });
 
-  if (filteredActions.length === 0) {
+  const compostActs = compostTxActions();
+  if (filteredActions.length + compostActs.length === 0) {
     txStatus.textContent = "⚠️ Nothing to send after skipping unaffordable actions.";
     txStatus.className = "tx-status fail";
     return;
   }
 
   // ── Append the locked fee action if it exists ──
-  let finalActions = filteredActions;
+  // Order: farm actions, compost purchase (assert → deposit → purchase), fee last.
+  let finalActions = [...filteredActions, ...compostActs];
   if (lockedFeeAction) {
-    finalActions = [...filteredActions, lockedFeeAction];
+    finalActions = [...finalActions, lockedFeeAction];
   }
 
   const actions = finalActions.map(({ _label, ...a }) => ({
@@ -1963,6 +1977,7 @@ get("sendBtn").addEventListener("click", async () => {
     await session.transact({ actions }, { broadcast: true });
     txStatus.textContent = "✅ Transaction sent!";
     txStatus.className = "tx-status ok";
+    compostPicks = [];
     setTimeout(() => {
       txStatus.textContent = "";
       get("refreshBtn").click();
@@ -1971,6 +1986,11 @@ get("sendBtn").addEventListener("click", async () => {
     txStatus.textContent = "❌ " + (e.message || e);
     txStatus.className = "tx-status fail";
     console.error(e);
+    // A stale compost listing fails the whole signature — re-scan so the next try uses fresh listings.
+    if (compostActs.length > 0) {
+      txStatus.textContent += " (compost listings may have changed — re-scanning; try again)";
+      scanCompostMarket();
+    }
   }
 });
 
@@ -2081,9 +2101,13 @@ function buildCompostPurchaseActions(picks) {
 
 let compostPicks = [];
 
-get("compostScanBtn").addEventListener("click", async () => {
-  const status = get("compostStatus"), list = get("compostList"), buyBtn = get("compostBuyBtn");
-  buyBtn.disabled = true; compostPicks = []; list.innerHTML = "";
+let compostScanning = false;
+async function scanCompostMarket() {
+  if (compostScanning) return;
+  compostScanning = true;
+  const status = get("compostStatus"), list = get("compostList");
+  get("compostScanBtn").disabled = true;
+  compostPicks = []; list.innerHTML = "";
   status.className = "tx-status"; status.textContent = "Scanning…";
   try {
     const waxBalance = (await fetchWaxBalance()) - COMPOST_BUY_WAX_RESERVE;
@@ -2115,34 +2139,44 @@ get("compostScanBtn").addEventListener("click", async () => {
     list.innerHTML = lines.join("");
     if (compostPicks.length === 0) { status.textContent = "Nothing to buy right now."; return; }
     const total = compostPicks.reduce((sum, c) => sum + c.units, 0n);
-    status.textContent = `${compostPicks.length} listing(s) for ${waxStr(total)}.`;
-    buyBtn.disabled = false;
+    status.textContent = `${compostPicks.length} listing(s) for ${waxStr(total)} — added to the queue, signed with Send Transaction.`;
   } catch (e) {
     status.textContent = "❌ " + (e.message || e);
     status.className = "tx-status fail";
     console.error(e);
+  } finally {
+    compostScanning = false;
+    get("compostScanBtn").disabled = false;
   }
-});
+}
+get("compostScanBtn").addEventListener("click", scanCompostMarket);
 
-get("compostBuyBtn").addEventListener("click", async () => {
-  const status = get("compostStatus"), buyBtn = get("compostBuyBtn");
-  if (compostPicks.length === 0) return;
-  buyBtn.disabled = true;
-  status.className = "tx-status"; status.textContent = "Signing…";
-  const actions = buildCompostPurchaseActions(compostPicks).map(a => ({ ...a, authorization: [perm()] }));
+// Purchase actions for the current scan results, with queue labels. These ride
+// in the SAME transaction (one signature) as the farm actions.
+function compostTxActions() {
+  if (compostPicks.length === 0) return [];
+  const raw = buildCompostPurchaseActions(compostPicks);
+  const n = compostPicks.length;
+  return raw.map((a, i) => {
+    let label;
+    if (i < n) label = `🛒 Assert sale ${compostPicks[i].sale_id}`;
+    else if (i === n) label = `🛒 Deposit ${a.data.quantity} to AtomicMarket`;
+    else { const c = compostPicks[i - n - 1]; label = `🛒 Buy ${c.label} (${c.asset_id}) — ${waxStr(c.units)}`; }
+    return { ...a, _label: label };
+  });
+}
+
+// ─── Auto-login ───────────────────────────────────────────────────────────────
+// Restores the previous wallet session on page load (no popup). "Disconnect"
+// clears it, so auto-login only happens while you're still connected.
+(async () => {
   try {
-    await session.transact({ actions }, { broadcast: true });
-    status.textContent = `✅ Bought ${compostPicks.length} compost NFT(s)!`;
-    status.className = "tx-status ok";
-    compostPicks = [];
-    setTimeout(() => get("refreshBtn").click(), 2000);
+    const restored = await sessionKit.restore();
+    if (restored) { session = restored; onLoggedIn(); }
   } catch (e) {
-    status.textContent = "❌ " + (e.message || e) + " — listings may have changed; re-scan.";
-    status.className = "tx-status fail";
-    buyBtn.disabled = false;
-    console.error(e);
+    console.warn("Auto-login failed — use Connect Wallet.", e);
   }
-});
+})();
 
 // ─── UInt64 conversion ────────────────────────────────────────────────────────
 const UINT64_FIELDS = new Set([
